@@ -144,11 +144,81 @@
   gap: 9px;
 }
 
+.auth-verification-email {
+  margin: 0 0 4px;
+  color: #75809a;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.auth-verification-email strong {
+  color: #46516d;
+}
+
+.auth-code-input {
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid #e4e9f2;
+  border-radius: 12px;
+  background: #f8faff;
+  color: #17213d;
+  font-size: 24px;
+  font-weight: 750;
+  letter-spacing: 0.38em;
+  outline: 0;
+  padding: 0 18px 0 24px;
+  text-align: center;
+}
+
+.auth-code-input:focus {
+  border-color: #506bc2;
+  box-shadow: 0 0 0 3px rgb(66 99 192 / 12%);
+}
+
+.auth-resend {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.auth-resend button {
+  border: 0;
+  background: transparent;
+  color: #3859b7;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 0;
+}
+
+.auth-resend button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.auth-name-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auth-name-grid > div {
+  min-width: 0;
+}
+
+.auth-name-grid label,
 .auth-form > label {
   margin-top: 6px;
   color: #46516d;
   font-size: 12px;
   font-weight: 650;
+}
+
+.auth-name-grid label {
+  display: block;
+  margin-bottom: 9px;
 }
 
 .auth-input-wrap {

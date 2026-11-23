@@ -22,7 +22,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { AuthScreen, LoadingScreen, SplashScreen } from "./AuthScreens.jsx";
+import { AuthScreen, SplashScreen } from "./AuthScreens.jsx";
 import { supabase } from "./supabase.js";
 
 const STORAGE_KEY = "controle-reposicao-v1";
@@ -651,12 +651,7 @@ function Dashboard({ user, themeToggle }) {
   }
 
   if (dataLoading) {
-    return (
-      <>
-        <div className="theme-toggle-floating">{themeToggle}</div>
-        <LoadingScreen label="Sincronizando seus dados..." />
-      </>
-    );
+    return null;
   }
 
   if (loadError) {
@@ -1471,12 +1466,7 @@ function App() {
     );
   }
   if (authLoading) {
-    return (
-      <>
-        <div className="theme-toggle-floating">{themeToggle}</div>
-        <LoadingScreen label="Verificando sua conta..." />
-      </>
-    );
+    return null;
   }
   if (!session) {
     return (
