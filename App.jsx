@@ -22,11 +22,25 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { AuthScreen, SplashScreen } from "./AuthScreens.jsx";
+import {
+  AuthScreen,
+  PENDING_REGISTRATION_STORAGE_KEY,
+  REGISTRATION_COMPLETED_EVENT,
+  SplashScreen,
+} from "./AuthScreens.jsx";
 import { supabase } from "./supabase.js";
 
 const STORAGE_KEY = "controle-reposicao-v1";
 const THEME_STORAGE_KEY = "points-theme-preference";
+
+function hasPendingRegistration() {
+  try {
+    return Boolean(window.sessionStorage.getItem(PENDING_REGISTRATION_STORAGE_KEY));
+  } catch (error) {
+    console.error("Não foi possível verificar o cadastro pendente.", error);
+    return false;
+  }
+}
 
 const fieldClass =
   "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10";
@@ -1408,7 +1422,7 @@ function App() {
           console.error("Não foi possível verificar a sessão.", error);
           setAuthError(`Não foi possível verificar sua sessão. ${error.message}`);
         }
-        setSession(data.session);
+        setSession(hasPendingRegistration() ? null : data.session);
         setAuthLoading(false);
       })
       .catch((error) => {
@@ -1427,14 +1441,45 @@ function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!active) return;
+      if (nextSession && hasPendingRegistration()) {
+        setSession(null);
+        setAuthError("");
+        setAuthLoading(false);
+        return;
+      }
       setSession(nextSession);
       setAuthError("");
       setAuthLoading(false);
     });
 
+    async function syncSessionAfterRegistration() {
+      if (!active) return;
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!active) return;
+        setSession(data.session);
+        setAuthError("");
+        setAuthLoading(false);
+      } catch (error) {
+        console.error("Não foi possível carregar a sessão após o cadastro.", error);
+        if (active) {
+          setAuthError(
+            `Não foi possível carregar sua sessão. ${
+              error instanceof Error ? error.message : ""
+            }`,
+          );
+          setAuthLoading(false);
+        }
+      }
+    }
+
+    window.addEventListener(REGISTRATION_COMPLETED_EVENT, syncSessionAfterRegistration);
+
     return () => {
       active = false;
       subscription.unsubscribe();
+      window.removeEventListener(REGISTRATION_COMPLETED_EVENT, syncSessionAfterRegistration);
     };
   }, []);
 

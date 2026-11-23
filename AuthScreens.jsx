@@ -1,20 +1,84 @@
-import { useState } from "react";
-import { ArrowRight, Eye, EyeOff, House, LoaderCircle, Mail, User } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowRight, Eye, EyeOff, House, LoaderCircle, Mail, Pencil, User } from "lucide-react";
 import { supabase } from "./supabase.js";
 import "./auth.css";
 
-function getAuthErrorMessage(error, action) {
+export const PENDING_REGISTRATION_STORAGE_KEY = "points-pending-verification-email";
+export const REGISTRATION_COMPLETED_EVENT = "points-registration-completed";
+
+function getPendingRegistration() {
+  try {
+    sessionStorage.removeItem("points-pending-signup-names");
+    const storedRegistration = sessionStorage.getItem(PENDING_REGISTRATION_STORAGE_KEY);
+    if (!storedRegistration) return { email: "", stage: "code" };
+
+    try {
+      const registration = JSON.parse(storedRegistration);
+      if (typeof registration.email === "string") {
+        return {
+          email: registration.email.trim(),
+          stage: registration.stage === "profile" ? "profile" : "code",
+        };
+      }
+    } catch {
+      return { email: storedRegistration.trim(), stage: "code" };
+    }
+
+    return { email: "", stage: "code" };
+  } catch (error) {
+    console.error("Não foi possível recuperar a verificação pendente.", error);
+    return { email: "", stage: "code" };
+  }
+}
+
+function savePendingRegistration(email, stage = "code") {
+  try {
+    sessionStorage.setItem(
+      PENDING_REGISTRATION_STORAGE_KEY,
+      JSON.stringify({ email: email.trim(), stage }),
+    );
+  } catch (error) {
+    console.error("Não foi possível salvar a verificação pendente.", error);
+  }
+}
+
+function clearPendingRegistration() {
+  try {
+    sessionStorage.removeItem(PENDING_REGISTRATION_STORAGE_KEY);
+  } catch (error) {
+    console.error("Não foi possível limpar a verificação pendente.", error);
+  }
+}
+
+function isRateLimitError(error) {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   const code = typeof error?.code === "string" ? error.code.toLowerCase() : "";
   const status = Number(error?.status);
 
-  if (
+  return (
     status === 429 ||
     code.includes("rate_limit") ||
     message.includes("rate limit") ||
     message.includes("too many requests")
-  ) {
-    return "O envio foi limitado temporariamente. Aguarde alguns minutos antes de tentar novamente.";
+  );
+}
+
+function getRateLimitWaitSeconds(error) {
+  const message = error instanceof Error ? error.message : "";
+  const match = message.match(/after\s+(\d+)\s+(seconds?|minutes?)/i);
+
+  if (!match) return 60;
+  return Number(match[1]) * (match[2].toLowerCase().startsWith("minute") ? 60 : 1);
+}
+
+function getAuthErrorMessage(error, action) {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  const code = typeof error?.code === "string" ? error.code.toLowerCase() : "";
+
+  if (isRateLimitError(error)) {
+    return action === "resend"
+      ? "Insira o código enviado anteriormente ou aguarde para reenviar um novo."
+      : "O envio foi limitado temporariamente. Aguarde alguns minutos antes de tentar novamente.";
   }
 
   if (
@@ -57,6 +121,10 @@ function getAuthErrorMessage(error, action) {
     return "Não foi possível confirmar o código. Confira os números e tente novamente.";
   }
 
+  if (action === "update") {
+    return "O código foi confirmado, mas não foi possível salvar seus dados. Tente novamente.";
+  }
+
   if (action === "signup") {
     return "Não foi possível criar a conta. Verifique os dados e tente novamente.";
   }
@@ -89,21 +157,79 @@ export function LoadingScreen({ label = "Carregando..." }) {
 }
 
 export function AuthScreen({ configured, authError, themeToggle }) {
+  const [storedRegistration] = useState(getPendingRegistration);
   const [mode, setMode] = useState("login");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(storedRegistration.email);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
-  const [awaitingVerification, setAwaitingVerification] = useState(false);
+  const [awaitingVerification, setAwaitingVerification] = useState(
+    Boolean(storedRegistration.email) && storedRegistration.stage === "code",
+  );
+  const [awaitingAccountDetails, setAwaitingAccountDetails] = useState(
+    Boolean(storedRegistration.email) && storedRegistration.stage === "profile",
+  );
+  const [needsSignupDetails, setNeedsSignupDetails] = useState(Boolean(storedRegistration.email));
+  const [resendCooldownSeconds, setResendCooldownSeconds] = useState(0);
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
 
+  useEffect(() => {
+    if (resendCooldownSeconds <= 0) return undefined;
+
+    const timer = window.setTimeout(
+      () => setResendCooldownSeconds((seconds) => Math.max(0, seconds - 1)),
+      1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [resendCooldownSeconds]);
+
+  async function finishSignup() {
+    const { error } = await supabase.auth.updateUser({
+      password,
+      data: { full_name: `${firstName.trim()} ${lastName.trim()}`.trim() },
+    });
+    if (error) throw error;
+
+    clearPendingRegistration();
+    setAwaitingAccountDetails(false);
+    setNeedsSignupDetails(false);
+    window.dispatchEvent(new Event(REGISTRATION_COMPLETED_EVENT));
+  }
+
   async function submit(event) {
     event.preventDefault();
     if (!supabase || busy) return;
+
+    if (awaitingAccountDetails) {
+      if (!firstName.trim() || !lastName.trim()) {
+        setMessage({ type: "error", text: "Informe seu nome e sobrenome para concluir o cadastro." });
+        return;
+      }
+      if (password.length < 6) {
+        setMessage({ type: "error", text: "A senha deve ter pelo menos 6 caracteres." });
+        return;
+      }
+      if (password !== confirmPassword) {
+        setMessage({ type: "error", text: "As senhas não são iguais." });
+        return;
+      }
+
+      setBusy(true);
+      setMessage(null);
+      try {
+        await finishSignup();
+      } catch (error) {
+        console.error("Não foi possível salvar os dados do cadastro.", error);
+        setMessage({ type: "error", text: getAuthErrorMessage(error, "update") });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
 
     if (awaitingVerification) {
       if (!/^\d{6}$/.test(verificationCode)) {
@@ -116,18 +242,44 @@ export function AuthScreen({ configured, authError, themeToggle }) {
 
       setBusy(true);
       setMessage(null);
+      let verificationSucceeded = false;
       try {
         const { error } = await supabase.auth.verifyOtp({
           email: email.trim(),
           token: verificationCode,
-          type: "signup",
+          type: "email",
         });
         if (error) throw error;
+        verificationSucceeded = true;
+
+        if (needsSignupDetails) {
+          savePendingRegistration(email, "profile");
+          setAwaitingVerification(false);
+          setAwaitingAccountDetails(true);
+          setVerificationCode("");
+          setMessage({
+            type: "success",
+            text: "Código confirmado. Agora informe seu nome e senha para concluir o cadastro.",
+          });
+        } else {
+          await finishSignup();
+        }
       } catch (error) {
-        console.error("Não foi possível confirmar o cadastro.", error);
+        if (verificationSucceeded) {
+          savePendingRegistration(email, "profile");
+          setAwaitingVerification(false);
+          setAwaitingAccountDetails(true);
+          setNeedsSignupDetails(true);
+        }
+        console.error(
+          verificationSucceeded
+            ? "O código foi confirmado, mas não foi possível salvar os dados do cadastro."
+            : "Não foi possível confirmar o cadastro.",
+          error,
+        );
         setMessage({
           type: "error",
-          text: getAuthErrorMessage(error, "verify"),
+          text: getAuthErrorMessage(error, verificationSucceeded ? "update" : "verify"),
         });
       } finally {
         setBusy(false);
@@ -154,43 +306,73 @@ export function AuthScreen({ configured, authError, themeToggle }) {
     setBusy(true);
     setMessage(null);
     try {
-      const result =
-        mode === "login"
-          ? await supabase.auth.signInWithPassword({ email: email.trim(), password })
-          : await supabase.auth.signUp({
-              email: email.trim(),
-              password,
-              options: {
-                data: {
-                  first_name: firstName.trim(),
-                  last_name: lastName.trim(),
-                  full_name: `${firstName.trim()} ${lastName.trim()}`.trim(),
-                },
-              },
-            });
-
-      if (result.error) throw result.error;
-      if (mode === "signup" && !result.data.session) {
+      if (mode === "signup") {
+        const normalizedEmail = email.trim();
+        savePendingRegistration(normalizedEmail);
         setAwaitingVerification(true);
+        setNeedsSignupDetails(false);
+        setAwaitingAccountDetails(false);
+
+        const { error } = await supabase.auth.signInWithOtp({ email: normalizedEmail });
+        if (error) throw error;
+
         setMessage({
           type: "success",
-          text: "Conta criada. Digite o código de 6 números enviado para seu e-mail.",
+          text: "Digite o código de 6 dígitos enviado para seu e-mail para concluir o cadastro.",
         });
+      } else {
+        clearPendingRegistration();
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (error) throw error;
       }
     } catch (error) {
       console.error("Não foi possível autenticar a conta.", error);
-      const emailDeliveryFailure =
-        mode === "signup" &&
-        (/error sending .*email|failed to send .*email|smtp|email provider/i.test(
-          error instanceof Error ? error.message : "",
-        ) ||
-          (typeof error?.code === "string" &&
-            error.code.toLowerCase().includes("email") &&
-            error.code.toLowerCase().includes("send")));
-      if (emailDeliveryFailure) setAwaitingVerification(true);
+      const emailNotConfirmed =
+        mode === "login" &&
+        (error?.code === "email_not_confirmed" ||
+          (error instanceof Error &&
+            /email (is )?not confirmed/i.test(error.message)));
+
+      if (emailNotConfirmed) {
+        savePendingRegistration(email);
+        setNeedsSignupDetails(true);
+        setConfirmPassword(password);
+        setVerificationCode("");
+        setAwaitingVerification(true);
+        try {
+          const { error: resendError } = await supabase.auth.signInWithOtp({
+            email: email.trim(),
+          });
+          if (resendError) throw resendError;
+          setMessage({
+            type: "success",
+            text: "Seu e-mail ainda não foi confirmado. Um novo código foi enviado.",
+          });
+        } catch (resendError) {
+          console.error("Não foi possível reenviar o código.", resendError);
+          if (isRateLimitError(resendError)) {
+            setResendCooldownSeconds(getRateLimitWaitSeconds(resendError));
+          }
+          setMessage({
+            type: "error",
+            text: getAuthErrorMessage(resendError, "resend"),
+          });
+        }
+        return;
+      }
+
+      if (mode === "signup" && isRateLimitError(error)) {
+        setResendCooldownSeconds(getRateLimitWaitSeconds(error));
+      }
       setMessage({
         type: "error",
-        text: getAuthErrorMessage(error, mode === "login" ? "login" : "signup"),
+        text: getAuthErrorMessage(
+          error,
+          mode === "login" ? "login" : isRateLimitError(error) ? "resend" : "signup",
+        ),
       });
     } finally {
       setBusy(false);
@@ -200,20 +382,32 @@ export function AuthScreen({ configured, authError, themeToggle }) {
   async function resendCode() {
     if (!supabase || busy) return;
 
+    if (!email.trim()) {
+      setMessage({
+        type: "error",
+        text: "Informe o e-mail usado no cadastro para reenviar o código.",
+      });
+      return;
+    }
+
     setBusy(true);
     setMessage(null);
     try {
-      const { error } = await supabase.auth.resend({
-        type: "signup",
-        email: email.trim(),
-      });
+      savePendingRegistration(email);
+      const { error } = await supabase.auth.signInWithOtp({ email: email.trim() });
       if (error) throw error;
+      setResendCooldownSeconds(0);
+      setVerificationCode("");
+      setAwaitingVerification(true);
       setMessage({
         type: "success",
-        text: "Um novo código foi enviado para seu e-mail.",
+        text: "Código enviado. Digite os 6 dígitos para concluir o cadastro.",
       });
     } catch (error) {
       console.error("Não foi possível reenviar o código.", error);
+      if (isRateLimitError(error)) {
+        setResendCooldownSeconds(getRateLimitWaitSeconds(error));
+      }
       setMessage({
         type: "error",
         text: getAuthErrorMessage(error, "resend"),
@@ -226,6 +420,8 @@ export function AuthScreen({ configured, authError, themeToggle }) {
   async function signInWithGoogle() {
     if (!supabase || busy) return;
 
+    const pendingRegistration = getPendingRegistration();
+    clearPendingRegistration();
     setBusy(true);
     setMessage(null);
     try {
@@ -236,6 +432,9 @@ export function AuthScreen({ configured, authError, themeToggle }) {
       if (error) throw error;
     } catch (error) {
       console.error("Não foi possível iniciar o acesso com Google.", error);
+      if (pendingRegistration.email) {
+        savePendingRegistration(pendingRegistration.email, pendingRegistration.stage);
+      }
       setMessage({
         type: "error",
         text: error instanceof Error ? error.message : "Não foi possível iniciar o acesso com Google.",
@@ -254,6 +453,23 @@ export function AuthScreen({ configured, authError, themeToggle }) {
     setMessage(null);
   }
 
+  function changeVerificationEmail() {
+    setMode("signup");
+    setAwaitingVerification(false);
+    setAwaitingAccountDetails(false);
+    setVerificationCode("");
+    setConfirmPassword(password);
+    setResendCooldownSeconds(0);
+    setShowPassword(false);
+    setMessage(null);
+  }
+
+  const showSignupDetails =
+    (!awaitingVerification && mode === "signup") ||
+    awaitingAccountDetails;
+  const showPasswordFields = !awaitingVerification || awaitingAccountDetails;
+  const showConfirmPassword = mode === "signup" || awaitingAccountDetails;
+
   return (
     <main className="auth-page">
       <div className="auth-background-glow" aria-hidden="true" />
@@ -270,15 +486,19 @@ export function AuthScreen({ configured, authError, themeToggle }) {
           <div className="auth-card-heading">
             <p className="auth-eyebrow">CONTROLE DE PONTOS</p>
             <h1 id="auth-title">
-              {awaitingVerification
-                ? "Confirme seu e-mail"
+              {awaitingAccountDetails
+                ? "Finalize seu cadastro"
+                : awaitingVerification
+                  ? "Confirme seu e-mail"
                 : mode === "login"
                   ? "Bem-vindo de volta"
                   : "Crie sua conta"}
             </h1>
             <p>
-              {awaitingVerification
-                ? "Use o código enviado para concluir o cadastro."
+              {awaitingAccountDetails
+                ? "Seu e-mail foi confirmado. Complete os dados para ativar sua conta."
+                : awaitingVerification
+                  ? "Use o código enviado para concluir o cadastro."
                 : mode === "login"
                   ? "Entre para acompanhar seus pedidos e recebimentos."
                   : "Cadastre-se para salvar seus pontos e pedidos na sua conta."}
@@ -307,11 +527,29 @@ export function AuthScreen({ configured, authError, themeToggle }) {
           )}
 
           <form className="auth-form" onSubmit={submit}>
-            {awaitingVerification ? (
+            {awaitingAccountDetails && (
+              <p className="auth-verification-email">
+                E-mail confirmado: <strong>{email}</strong>
+              </p>
+            )}
+
+            {awaitingVerification && (
               <>
-                <p className="auth-verification-email">
-                  Enviamos um código de 6 números para <strong>{email}</strong>
-                </p>
+                <div className="auth-verification-email-row">
+                  <p className="auth-verification-email">
+                    Enviamos um código de 6 números para <strong>{email}</strong>
+                  </p>
+                  <button
+                    className="auth-change-email-button"
+                    type="button"
+                    onClick={changeVerificationEmail}
+                    disabled={busy}
+                    aria-label="Alterar e-mail"
+                    title="Alterar e-mail"
+                  >
+                    <Pencil size={15} aria-hidden="true" />
+                  </button>
+                </div>
                 <label htmlFor="auth-verification-code">Código de confirmação</label>
                 <input
                   id="auth-verification-code"
@@ -329,9 +567,15 @@ export function AuthScreen({ configured, authError, themeToggle }) {
                   required
                   disabled={!configured || busy}
                 />
+                {needsSignupDetails && (
+                  <p className="auth-verification-email">
+                    Para concluir o cadastro após a retomada, confirme o código e depois informe seu nome e senha.
+                  </p>
+                )}
               </>
-            ) : (
-              mode === "signup" && (
+            )}
+
+            {showSignupDetails && (
               <div className="auth-name-grid">
                 <div>
                   <label htmlFor="auth-first-name">Nome</label>
@@ -366,77 +610,80 @@ export function AuthScreen({ configured, authError, themeToggle }) {
                   </div>
                 </div>
               </div>
-              )
             )}
 
-            {!awaitingVerification && (
+            {!awaitingVerification && !awaitingAccountDetails && (
               <>
-            <label htmlFor="auth-email">E-mail</label>
-            <div className="auth-input-wrap">
-              <Mail size={18} aria-hidden="true" />
-              <input
-                id="auth-email"
-                type="email"
-                autoComplete="email"
-                placeholder="seu@email.com"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-                disabled={!configured || busy}
-              />
-            </div>
+                <label htmlFor="auth-email">E-mail</label>
+                <div className="auth-input-wrap">
+                  <Mail size={18} aria-hidden="true" />
+                  <input
+                    id="auth-email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="seu@email.com"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    required
+                    disabled={!configured || busy}
+                  />
+                </div>
+              </>
+            )}
 
-            <label htmlFor="auth-password">Senha</label>
-            <div className="auth-input-wrap">
-              <input
-                id="auth-password"
-                type={showPassword ? "text" : "password"}
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                placeholder="Mínimo de 6 caracteres"
-                minLength={6}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                disabled={!configured || busy}
-              />
-              <button
-                className="auth-password-toggle"
-                type="button"
-                aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
-                onClick={() => setShowPassword((current) => !current)}
-                disabled={!configured || busy}
-              >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
-            </div>
-
-            {mode === "signup" && (
+            {showPasswordFields && (
               <>
-                <label htmlFor="auth-confirm-password">Confirmar senha</label>
+                <label htmlFor="auth-password">Senha</label>
                 <div className="auth-input-wrap">
                   <input
-                    id="auth-confirm-password"
+                    id="auth-password"
                     type={showPassword ? "text" : "password"}
-                    autoComplete="new-password"
-                    placeholder="Digite a senha novamente"
+                    autoComplete={mode === "login" && !awaitingVerification ? "current-password" : "new-password"}
+                    placeholder="Mínimo de 6 caracteres"
                     minLength={6}
-                    value={confirmPassword}
-                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
                     required
                     disabled={!configured || busy}
                   />
                   <button
                     className="auth-password-toggle"
                     type="button"
-                    aria-label={showPassword ? "Ocultar senhas" : "Mostrar senhas"}
+                    aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
                     onClick={() => setShowPassword((current) => !current)}
                     disabled={!configured || busy}
                   >
                     {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
-              </>
-            )}
+
+                {showConfirmPassword && (
+                  <>
+                    <label htmlFor="auth-confirm-password">Confirmar senha</label>
+                    <div className="auth-input-wrap">
+                      <input
+                        id="auth-confirm-password"
+                        type={showPassword ? "text" : "password"}
+                        autoComplete="new-password"
+                        placeholder="Digite a senha novamente"
+                        minLength={6}
+                        value={confirmPassword}
+                        onChange={(event) => setConfirmPassword(event.target.value)}
+                        required
+                        disabled={!configured || busy}
+                      />
+                      <button
+                        className="auth-password-toggle"
+                        type="button"
+                        aria-label={showPassword ? "Ocultar senhas" : "Mostrar senhas"}
+                        onClick={() => setShowPassword((current) => !current)}
+                        disabled={!configured || busy}
+                      >
+                        {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -447,9 +694,11 @@ export function AuthScreen({ configured, authError, themeToggle }) {
                 <>
                   {awaitingVerification
                     ? "Confirmar código"
-                    : mode === "login"
-                      ? "Entrar"
-                      : "Criar conta"}
+                    : awaitingAccountDetails
+                      ? "Finalizar cadastro"
+                      : mode === "login"
+                        ? "Entrar"
+                        : "Criar conta"}
                   <ArrowRight size={17} aria-hidden="true" />
                 </>
               )}
@@ -458,9 +707,21 @@ export function AuthScreen({ configured, authError, themeToggle }) {
 
           {awaitingVerification && (
             <div className="auth-resend">
-              <button type="button" onClick={resendCode} disabled={!configured || busy}>
-                Reenviar código
-              </button>
+              <div className="auth-resend-action">
+                <button
+                  type="button"
+                  onClick={resendCode}
+                  disabled={!configured || busy || resendCooldownSeconds > 0}
+                >
+                  Reenviar código
+                </button>
+                {resendCooldownSeconds > 0 && (
+                  <span className="auth-resend-countdown" aria-live="polite">
+                    {String(Math.floor(resendCooldownSeconds / 60)).padStart(2, "0")}:
+                    {String(resendCooldownSeconds % 60).padStart(2, "0")}
+                  </span>
+                )}
+              </div>
               <button type="button" onClick={() => changeMode("login")} disabled={busy}>
                 Voltar para entrar
               </button>
@@ -487,7 +748,7 @@ export function AuthScreen({ configured, authError, themeToggle }) {
             </>
           )}
 
-          {!awaitingVerification && (
+          {!awaitingVerification && !awaitingAccountDetails && (
           <p className="auth-switch">
             {mode === "login" ? "Ainda não tem uma conta?" : "Já tem uma conta?"}
             <button

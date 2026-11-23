@@ -144,16 +144,48 @@
   gap: 9px;
 }
 
+.auth-verification-email-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
 .auth-verification-email {
+  min-width: 0;
   margin: 0 0 4px;
   color: #75809a;
   font-size: 13px;
   line-height: 1.55;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .auth-verification-email strong {
   color: #46516d;
+}
+
+.auth-change-email-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #1f3a8a;
+  cursor: pointer;
+  padding: 5px;
+}
+
+.auth-change-email-button:hover:not(:disabled) {
+  background: #edf2ff;
+}
+
+.auth-change-email-button:focus-visible {
+  outline: 2px solid #506bc2;
+  outline-offset: 2px;
 }
 
 .auth-code-input {
@@ -178,15 +210,29 @@
 
 .auth-resend {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-top: 14px;
 }
 
+.auth-resend-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-resend-countdown {
+  color: #75809a;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .auth-resend button {
   border: 0;
   background: transparent;
-  color: #3859b7;
+  color: #1f3a8a;
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -194,8 +240,8 @@
 }
 
 .auth-resend button:disabled {
-  cursor: wait;
-  opacity: 0.55;
+  cursor: not-allowed;
+  opacity: 1;
 }
 
 .auth-name-grid {
@@ -537,6 +583,23 @@
 
 :root[data-theme="dark"] .auth-eyebrow {
   color: #a9baff;
+}
+
+:root[data-theme="dark"] .auth-resend-countdown {
+  color: #aab5cd;
+}
+
+:root[data-theme="dark"] .auth-verification-email strong {
+  color: #fff;
+}
+
+:root[data-theme="dark"] .auth-change-email-button,
+:root[data-theme="dark"] .auth-resend button {
+  color: #fff;
+}
+
+:root[data-theme="dark"] .auth-change-email-button:hover:not(:disabled) {
+  background: rgb(255 255 255 / 12%);
 }
 
 :root[data-theme="dark"] .auth-form > label {
