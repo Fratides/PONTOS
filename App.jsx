@@ -12,6 +12,7 @@ import {
   LogOut,
   Moon,
   Package,
+  PanelRight,
   Pencil,
   Plus,
   ReceiptText,
@@ -19,7 +20,6 @@ import {
   Store,
   Sun,
   Trash2,
-  Wallet,
   X,
 } from "lucide-react";
 import {
@@ -46,20 +46,71 @@ const fieldClass =
   "h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10";
 
 function emptyData() {
-  return { unitPrice: 0, points: [], orders: [] };
+  return { unitPrice: 0, products: [], points: [], orders: [] };
 }
 
 function normalizeData(value) {
   if (!value || !Array.isArray(value.points) || !Array.isArray(value.orders)) return null;
+  const unitPrice = Number.isFinite(value.unitPrice) && value.unitPrice >= 0 ? value.unitPrice : 0;
+  const products = Array.isArray(value.products)
+    ? value.products.filter(
+        (product) =>
+          product &&
+          typeof product.id === "string" &&
+          typeof product.name === "string" &&
+          Number.isFinite(product.unitPrice) &&
+          product.unitPrice >= 0,
+      )
+    : [];
+  if (!products.length && unitPrice > 0) {
+    products.push({ id: "legacy-default-product", name: "Produto antigo", unitPrice });
+  }
 
   return {
-    unitPrice: Number.isFinite(value.unitPrice) && value.unitPrice >= 0 ? value.unitPrice : 0,
+    unitPrice,
+    products,
     points: value.points.filter(
       (point) => point && typeof point.id === "string" && typeof point.name === "string",
     ),
     orders: value.orders.filter(
       (order) => order && typeof order.id === "string" && typeof order.pointId === "string",
-    ),
+    ).map((order) => {
+      const items = Array.isArray(order.items)
+        ? order.items
+            .filter(
+              (item) =>
+                item &&
+                typeof item.name === "string" &&
+                Number.isInteger(item.quantity) &&
+                item.quantity > 0 &&
+                Number.isFinite(item.unitPrice) &&
+                item.unitPrice >= 0,
+            )
+            .map((item, index) => ({
+              id: typeof item.id === "string" ? item.id : `${order.id}-${index}`,
+              productId: typeof item.productId === "string" ? item.productId : null,
+              name: item.name,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+            }))
+        : [];
+      return {
+        ...order,
+        items:
+          items.length > 0
+            ? items
+            : [
+                {
+                  id: `${order.id}-legacy`,
+                  productId: null,
+                  name: "Produto",
+                  quantity: Number.isInteger(order.quantity) && order.quantity > 0 ? order.quantity : 1,
+                  unitPrice:
+                    Number.isFinite(order.unitPrice) && order.unitPrice >= 0 ? order.unitPrice : 0,
+                },
+              ],
+      };
+    }),
   };
 }
 
@@ -122,9 +173,15 @@ function createId() {
 function getTotals(orders) {
   const totalsInCents = orders.reduce(
     (totals, order) => {
-      totals.orders += Math.round(order.quantity * order.unitPrice * 100);
+      const items = order.items ?? [
+        { quantity: order.quantity, unitPrice: order.unitPrice },
+      ];
+      totals.orders += items.reduce(
+        (sum, item) => sum + Math.round(item.quantity * item.unitPrice * 100),
+        0,
+      );
       totals.received += Math.round(order.received * 100);
-      totals.quantity += order.quantity;
+      totals.quantity += items.reduce((sum, item) => sum + item.quantity, 0);
       return totals;
     },
     { orders: 0, received: 0, quantity: 0 },
@@ -135,6 +192,16 @@ function getTotals(orders) {
     received: totalsInCents.received / 100,
     quantity: totalsInCents.quantity,
   };
+}
+
+function getOrderTotalCents(order) {
+  const items = order.items ?? [
+    { quantity: order.quantity, unitPrice: order.unitPrice },
+  ];
+  return items.reduce(
+    (total, item) => total + Math.round(item.quantity * item.unitPrice * 100),
+    0,
+  );
 }
 
 function CurrencyInput({ id, label, value, onChange, className = fieldClass, ...props }) {
@@ -227,22 +294,21 @@ function Dashboard({ user, themeToggle }) {
   const [pointName, setPointName] = useState("");
   const [selectedPointId, setSelectedPointId] = useState(null);
   const [orderFormExpanded, setOrderFormExpanded] = useState(false);
-  const [priceEditing, setPriceEditing] = useState(() => data.unitPrice <= 0);
-  const [priceDraft, setPriceDraft] = useState("");
+  const [productsPanelOpen, setProductsPanelOpen] = useState(false);
+  const [productsPanelClosing, setProductsPanelClosing] = useState(false);
+  const [productDraft, setProductDraft] = useState({ name: "", unitPrice: "" });
+  const [editingProductId, setEditingProductId] = useState(null);
+  const [productEditDraft, setProductEditDraft] = useState({ name: "", unitPrice: "" });
   const [orderDraft, setOrderDraft] = useState({
     date: localDate(),
-    quantity: "",
-    customPriceEnabled: false,
-    customPrice: "",
+    items: [{ id: createId(), productId: "", quantity: "1", unitPrice: "" }],
   });
   const [editingOrderId, setEditingOrderId] = useState(null);
-  const [editPriceDraft, setEditPriceDraft] = useState("");
+  const [editPriceDrafts, setEditPriceDrafts] = useState({});
   const [paymentDrafts, setPaymentDrafts] = useState({});
   const [pendingDelete, setPendingDelete] = useState(null);
   const [notice, setNotice] = useState(null);
 
-  const priceCardRef = useRef(null);
-  const priceInputRef = useRef(null);
   const pointSectionRef = useRef(null);
   const shouldScrollToPointRef = useRef(false);
   const cancelDeleteRef = useRef(null);
@@ -267,7 +333,6 @@ function Dashboard({ user, themeToggle }) {
         if (!savedData) throw new Error("Os dados da conta estão em um formato inválido.");
         if (active) {
           setData(savedData);
-          setPriceEditing(savedData.unitPrice <= 0);
         }
       } else {
         let initialData = emptyData();
@@ -292,7 +357,6 @@ function Dashboard({ user, themeToggle }) {
         if (legacyData !== null) localStorage.removeItem(STORAGE_KEY);
         if (active) {
           setData(initialData);
-          setPriceEditing(initialData.unitPrice <= 0);
         }
       }
 
@@ -342,22 +406,18 @@ function Dashboard({ user, themeToggle }) {
   );
   const grandTotals = useMemo(() => getTotals(data.orders), [data.orders]);
   const activePointTotals = useMemo(() => getTotals(selectedOrders), [selectedOrders]);
-  const previewUnitPrice = orderDraft.customPriceEnabled
-    ? parseCurrency(orderDraft.customPrice)
-    : data.unitPrice;
-  const orderQuantity = Number(orderDraft.quantity);
-  const orderEstimate =
-    Number.isInteger(orderQuantity) && orderQuantity > 0
-      ? Math.round(orderQuantity * previewUnitPrice * 100) / 100
-      : 0;
-  const showPriceDetails = priceEditing || data.unitPrice <= 0;
-
-  useEffect(() => {
-    if (priceEditing && !dataLoading) {
-      priceInputRef.current?.focus();
-      priceInputRef.current?.select();
-    }
-  }, [priceEditing, dataLoading]);
+  const productDraftPrice = parseCurrency(productDraft.unitPrice);
+  const canSaveProduct =
+    Boolean(productDraft.name.trim()) &&
+    Number.isFinite(productDraftPrice) &&
+    productDraftPrice > 0;
+  const orderEstimateCents = orderDraft.items.reduce((total, item) => {
+    const quantity = Number(item.quantity);
+    const unitPrice = parseCurrency(item.unitPrice);
+    return Number.isInteger(quantity) && quantity > 0 && Number.isFinite(unitPrice)
+      ? total + Math.round(quantity * unitPrice * 100)
+      : total;
+  }, 0);
 
   useEffect(() => {
     if (pendingDelete) cancelDeleteRef.current?.focus();
@@ -378,6 +438,31 @@ function Dashboard({ user, themeToggle }) {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [pendingDelete]);
+
+  useEffect(() => {
+    if (!productsPanelOpen) return undefined;
+    function handleKeyDown(event) {
+      if (event.key === "Escape") setProductsPanelClosing(true);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [productsPanelOpen]);
+
+  useEffect(() => {
+    if (!productsPanelClosing) return undefined;
+    const closeDelay = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 1
+      : 280;
+    const timer = window.setTimeout(() => {
+      setProductsPanelOpen(false);
+      setProductsPanelClosing(false);
+    }, closeDelay);
+    return () => window.clearTimeout(timer);
+  }, [productsPanelClosing]);
+
+  function closeProductsPanel() {
+    setProductsPanelClosing(true);
+  }
 
   function notify(text, type = "success") {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
@@ -470,28 +555,80 @@ function Dashboard({ user, themeToggle }) {
     }
   }
 
-  function handleAppClick(event) {
-    if (!priceEditing || priceCardRef.current?.contains(event.target)) return;
-    setPriceEditing(false);
-    setPriceDraft("");
+  function updateProductDraft(field, value) {
+    setProductDraft((current) => ({
+      ...current,
+      [field]: field === "unitPrice" ? maskCurrency(value) : value,
+    }));
   }
 
-  function startPriceEdit() {
-    setPriceDraft(data.unitPrice ? formatPriceValue(data.unitPrice) : "");
-    setPriceEditing(true);
-  }
-
-  async function saveUnitPrice(event) {
+  async function saveProducts(event) {
     event.preventDefault();
-    const price = parseCurrency(priceDraft);
-    if (!Number.isFinite(price) || price <= 0) {
-      notify("Informe um valor por produto maior que zero.", "error");
+    const product = {
+      id: createId(),
+      name: productDraft.name.trim(),
+      unitPrice: parseCurrency(productDraft.unitPrice),
+    };
+    if (
+      !product.name ||
+      product.name.length > 80 ||
+      !Number.isFinite(product.unitPrice) ||
+      product.unitPrice <= 0
+    ) {
+      notify("Informe o nome e um valor maior que zero para o produto.", "error");
       return;
     }
-    const nextData = { ...data, unitPrice: Math.round(price * 100) / 100 };
-    if (await persist(nextData, "Valor do produto atualizado.")) {
-      setPriceEditing(false);
-      setPriceDraft("");
+    if (
+      data.products.some(
+        (item) =>
+          item.name.toLocaleLowerCase("pt-BR") === product.name.toLocaleLowerCase("pt-BR"),
+      )
+    ) {
+      notify("Já existe um produto com esse nome.", "error");
+      return;
+    }
+    if (
+      await persist(
+        {
+          ...data,
+          products: [
+            ...data.products,
+            { ...product, unitPrice: Math.round(product.unitPrice * 100) / 100 },
+          ],
+        },
+        "Produto criado.",
+      )
+    ) {
+      setProductDraft({ name: "", unitPrice: "" });
+    }
+  }
+
+  async function saveCatalogProduct(event, product) {
+    event.preventDefault();
+    const name = productEditDraft.name.trim();
+    const unitPrice = parseCurrency(productEditDraft.unitPrice);
+    if (!name || name.length > 80 || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+      notify("Informe o nome e um valor maior que zero para o produto.", "error");
+      return;
+    }
+    if (
+      data.products.some(
+        (item) =>
+          item.id !== product.id &&
+          item.name.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"),
+      )
+    ) {
+      notify("Já existe um produto com esse nome.", "error");
+      return;
+    }
+    const nextProducts = data.products.map((item) =>
+      item.id === product.id
+        ? { ...item, name, unitPrice: Math.round(unitPrice * 100) / 100 }
+        : item,
+    );
+    if (await persist({ ...data, products: nextProducts }, "Produto atualizado.")) {
+      setEditingProductId(null);
+      setProductEditDraft({ name: "", unitPrice: "" });
     }
   }
 
@@ -510,39 +647,45 @@ function Dashboard({ user, themeToggle }) {
       setOrderFormExpanded(false);
       setOrderDraft({
         date: localDate(),
-        quantity: "",
-        customPriceEnabled: false,
-        customPrice: "",
+        items: [{ id: createId(), productId: "", quantity: "1", unitPrice: "" }],
       });
     }
   }
 
-  function toggleCustomPrice() {
-    if (orderDraft.customPriceEnabled) {
-      setOrderDraft((current) => ({
-        ...current,
-        customPriceEnabled: false,
-        customPrice: "",
-      }));
-      return;
-    }
+  function updateOrderDraftItem(id, changes) {
     setOrderDraft((current) => ({
       ...current,
-      customPriceEnabled: true,
-      customPrice: data.unitPrice ? formatPriceValue(data.unitPrice) : "",
+      items: current.items.map((item) =>
+        item.id === id ? { ...item, ...changes } : item,
+      ),
     }));
   }
 
   async function addOrder(event) {
     event.preventDefault();
-    const quantity = Number(orderDraft.quantity);
-    const unitPrice = orderDraft.customPriceEnabled ? parseCurrency(orderDraft.customPrice) : data.unitPrice;
-    if (!selectedPoint || !orderDraft.date || !Number.isInteger(quantity) || quantity <= 0) {
-      notify("Informe a data e uma quantidade válida.", "error");
-      return;
-    }
-    if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
-      notify("Defina um valor por produto maior que zero.", "error");
+    const items = orderDraft.items.map((draft) => {
+      const product = data.products.find((item) => item.id === draft.productId);
+      return {
+        id: createId(),
+        productId: product?.id ?? null,
+        name: product?.name ?? "",
+        quantity: Number(draft.quantity),
+        unitPrice: parseCurrency(draft.unitPrice),
+      };
+    });
+    if (
+      !selectedPoint ||
+      !orderDraft.date ||
+      items.some(
+        (item) =>
+          !item.name ||
+          !Number.isInteger(item.quantity) ||
+          item.quantity <= 0 ||
+          !Number.isFinite(item.unitPrice) ||
+          item.unitPrice <= 0,
+      )
+    ) {
+      notify("Escolha um produto e informe quantidade e valor válidos para cada item.", "error");
       return;
     }
 
@@ -550,8 +693,10 @@ function Dashboard({ user, themeToggle }) {
       id: createId(),
       pointId: selectedPoint.id,
       date: orderDraft.date,
-      quantity,
-      unitPrice: Math.round(unitPrice * 100) / 100,
+      items: items.map((item) => ({
+        ...item,
+        unitPrice: Math.round(item.unitPrice * 100) / 100,
+      })),
       received: 0,
     };
     if (
@@ -562,11 +707,10 @@ function Dashboard({ user, themeToggle }) {
     ) {
       setOrderDraft({
         date: localDate(),
-        quantity: "",
-        customPriceEnabled: false,
-        customPrice: "",
+        items: [{ id: createId(), productId: "", quantity: "1", unitPrice: "" }],
       });
       setEditingOrderId(null);
+      setEditPriceDrafts({});
       setOrderFormExpanded(false);
     }
   }
@@ -574,7 +718,7 @@ function Dashboard({ user, themeToggle }) {
   async function registerPayment(event, order) {
     event.preventDefault();
     const amount = parseCurrency(paymentDrafts[order.id]);
-    const totalCents = Math.round(order.quantity * order.unitPrice * 100);
+    const totalCents = getOrderTotalCents(order);
     const receivedCents = Math.round(order.received * 100);
     const amountCents = Math.round(amount * 100);
     const remainingCents = totalCents - receivedCents;
@@ -595,12 +739,18 @@ function Dashboard({ user, themeToggle }) {
 
   async function saveOrderPrice(event, order) {
     event.preventDefault();
-    const price = parseCurrency(editPriceDraft);
-    if (!Number.isFinite(price) || price <= 0) {
-      notify("Informe um valor por produto maior que zero.", "error");
+    const items = order.items.map((item) => {
+      const price = parseCurrency(editPriceDrafts[item.id] ?? formatPriceValue(item.unitPrice));
+      return { ...item, unitPrice: price };
+    });
+    if (items.some((item) => !Number.isFinite(item.unitPrice) || item.unitPrice <= 0)) {
+      notify("Informe um valor maior que zero para cada produto do pedido.", "error");
       return;
     }
-    const totalCents = order.quantity * Math.round(price * 100);
+    const totalCents = items.reduce(
+      (total, item) => total + item.quantity * Math.round(item.unitPrice * 100),
+      0,
+    );
     const receivedCents = Math.round(order.received * 100);
     if (totalCents < receivedCents) {
       notify(`O total não pode ser menor que o valor já recebido (${money(order.received)}).`, "error");
@@ -608,11 +758,19 @@ function Dashboard({ user, themeToggle }) {
     }
 
     const nextOrders = data.orders.map((item) =>
-      item.id === order.id ? { ...item, unitPrice: Math.round(price * 100) / 100 } : item,
+      item.id === order.id
+        ? {
+            ...item,
+            items: items.map((product) => ({
+              ...product,
+              unitPrice: Math.round(product.unitPrice * 100) / 100,
+            })),
+          }
+        : item,
     );
     if (await persist({ ...data, orders: nextOrders }, "Valor deste pedido atualizado.")) {
       setEditingOrderId(null);
-      setEditPriceDraft("");
+      setEditPriceDrafts({});
     }
   }
 
@@ -653,9 +811,7 @@ function Dashboard({ user, themeToggle }) {
     setOrderFormExpanded(false);
     setOrderDraft({
       date: localDate(),
-      quantity: "",
-      customPriceEnabled: false,
-      customPrice: "",
+      items: [{ id: createId(), productId: "", quantity: "1", unitPrice: "" }],
     });
   }
 
@@ -690,28 +846,37 @@ function Dashboard({ user, themeToggle }) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800" onClick={handleAppClick}>
+    <div className="app-canvas min-h-screen bg-slate-50 text-slate-800">
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-9 lg:px-8">
-        <div className="dashboard-theme-toggle">{themeToggle}</div>
-        <header className="mb-6 grid gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:gap-6 sm:p-7 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-center">
-          <div className="flex items-start justify-between gap-3 lg:col-span-2">
-            <div className="flex min-w-0 items-start gap-4">
+        <div className="dashboard-theme-toggle items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setProductsPanelOpen(true)}
+            aria-label="Abrir produtos e valores"
+            title="Produtos e valores"
+            className="theme-toggle"
+          >
+            <PanelRight size={17} aria-hidden="true" />
+          </button>
+          <div>{themeToggle}</div>
+        </div>
+        <header className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center">
+            <span className="hidden sm:block" aria-hidden="true" />
+            <div className="flex min-w-0 flex-col items-center text-center">
               <span className="grid size-12 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-700">
                 <Store size={23} strokeWidth={1.8} aria-hidden="true" />
               </span>
               <div className="min-w-0">
-                <p className="hidden text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700 sm:block">
-                  Controle de vendas
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                  Controle de pontos
                 </p>
-                <h1 className="mt-0 hidden text-2xl font-semibold tracking-tight text-slate-950 sm:mt-2 sm:block sm:text-3xl">
-                  Pontos de Reposição
-                </h1>
-                <p className="mt-2 hidden max-w-xl text-sm leading-6 text-slate-500 sm:block">
+                <p className="mt-2 hidden text-sm leading-6 text-slate-500 sm:block">
                   Acompanhe pedidos, recebimentos e valores em aberto por ponto.
                 </p>
               </div>
             </div>
-            <div className="flex shrink-0 flex-col items-end gap-1">
+            <div className="hidden items-center justify-end gap-2 sm:flex">
               {profileNameEditing ? (
                 <form className="flex items-center gap-1" onSubmit={saveProfileName}>
                   <label className="sr-only" htmlFor="profile-name">
@@ -778,68 +943,6 @@ function Dashboard({ user, themeToggle }) {
             </div>
           </div>
 
-          <div
-            ref={priceCardRef}
-            className={`rounded-2xl border border-slate-200 bg-slate-50/80 lg:col-span-2 lg:justify-self-end ${
-              showPriceDetails
-                ? "p-4 lg:w-[340px]"
-                : "w-full p-2 sm:w-fit sm:justify-self-start lg:justify-self-end"
-            }`}
-          >
-            {showPriceDetails && (
-              <h1 className="mb-3 truncate text-base font-semibold tracking-tight text-slate-950 sm:hidden">
-                Pontos de Reposição
-              </h1>
-            )}
-            {showPriceDetails && (
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600">
-                <Wallet size={16} className="text-emerald-700" aria-hidden="true" />
-                Valor único do produto
-              </div>
-            )}
-            {showPriceDetails ? (
-              <form className="flex items-center gap-2" onSubmit={saveUnitPrice}>
-                <span className="text-sm font-medium text-slate-500">R$</span>
-                <CurrencyInput
-                  ref={priceInputRef}
-                  id="unit-price"
-                  label="Novo valor único"
-                  value={priceDraft}
-                  onChange={setPriceDraft}
-                  required
-                  className={`${fieldClass} min-w-0 flex-1`}
-                />
-                <button
-                  type="submit"
-                  className="inline-flex h-11 shrink-0 items-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 focus:outline-none focus:ring-4 focus:ring-emerald-600/20"
-                >
-                  <Check size={16} aria-hidden="true" />
-                  Salvar
-                </button>
-              </form>
-            ) : (
-              <div className="flex items-center justify-between gap-3 sm:justify-end">
-                <h1 className="min-w-0 truncate text-base font-semibold tracking-tight text-slate-950 sm:hidden">
-                  Pontos de Reposição
-                </h1>
-                <button
-                  type="button"
-                  aria-label="Editar valor único do produto"
-                  onClick={startPriceEdit}
-                  className="ml-auto inline-flex min-h-9 shrink-0 items-center rounded-xl border border-transparent bg-transparent px-2 text-left transition hover:bg-white/70 focus:outline-none focus:ring-4 focus:ring-emerald-500/10 sm:ml-0"
-                >
-                  <strong className="text-lg font-semibold tracking-tight text-slate-950">
-                    {money(data.unitPrice)}
-                  </strong>
-                </button>
-              </div>
-            )}
-            {showPriceDetails && (
-              <p className="mt-2 text-xs text-slate-500">
-                O preço salvo vale para os próximos pedidos.
-              </p>
-            )}
-          </div>
         </header>
 
         <section className="mb-6 grid grid-cols-3 gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-3" aria-label="Resumo geral">
@@ -1080,80 +1183,122 @@ function Dashboard({ user, themeToggle }) {
                       />
                     </span>
                   </label>
-                  <label className="grid gap-1.5 text-xs font-medium text-slate-600">
-                    Quantidade
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      className={fieldClass}
-                      placeholder="0"
-                      value={orderDraft.quantity}
-                      onChange={(event) =>
-                        setOrderDraft((current) => ({ ...current, quantity: event.target.value }))
-                      }
-                      required
-                    />
-                  </label>
-
-                  <div className="flex min-h-11 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3">
-                    <div className="min-w-0">
-                      <p className="text-[11px] font-medium text-slate-500">Valor por produto</p>
-                      <strong className="text-sm font-semibold text-slate-900">
-                        {money(previewUnitPrice)}
-                      </strong>
-                    </div>
-                    {!orderDraft.customPriceEnabled && (
-                      <button
-                        type="button"
-                        onClick={toggleCustomPrice}
-                        className="shrink-0 rounded-lg px-2 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50"
+                  <div className="grid gap-2 sm:col-span-2 lg:col-span-4">
+                    <p className="text-xs font-medium text-slate-600">Produtos do pedido</p>
+                    {orderDraft.items.map((item, index) => (
+                      <div
+                        key={item.id}
+                        className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3 sm:grid-cols-[minmax(0,1fr)_100px_minmax(130px,0.7fr)_40px]"
                       >
-                        Alterar valor
-                      </button>
-                    )}
-                  </div>
-
-                  {orderDraft.customPriceEnabled && (
-                    <div className="grid gap-2 rounded-xl border border-emerald-100 bg-emerald-50/50 p-3 sm:col-span-2 lg:col-span-4 lg:grid-cols-[minmax(0,250px)_auto] lg:items-end">
-                      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
-                        Valor deste pedido (R$)
-                        <CurrencyInput
-                          label="Valor deste pedido"
-                          value={orderDraft.customPrice}
-                          onChange={(value) =>
-                            setOrderDraft((current) => ({ ...current, customPrice: value }))
+                        <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                          Produto
+                          <select
+                            className={fieldClass}
+                            aria-label={`Produto ${index + 1} do pedido`}
+                            value={item.productId}
+                            onChange={(event) => {
+                              const product = data.products.find(
+                                (candidate) => candidate.id === event.target.value,
+                              );
+                              updateOrderDraftItem(item.id, {
+                                productId: product?.id ?? "",
+                                unitPrice: product ? formatPriceValue(product.unitPrice) : "",
+                              });
+                            }}
+                            required
+                          >
+                            <option value="">Selecione um produto</option>
+                            {data.products.map((product) => (
+                              <option key={product.id} value={product.id}>
+                                {product.name} - {money(product.unitPrice)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                          Quantidade
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            className={fieldClass}
+                            value={item.quantity}
+                            onChange={(event) =>
+                              updateOrderDraftItem(item.id, { quantity: event.target.value })
+                            }
+                            required
+                          />
+                        </label>
+                        <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                          Valor neste pedido
+                          <CurrencyInput
+                            label={`Valor do produto ${index + 1} neste pedido`}
+                            value={item.unitPrice}
+                            onChange={(value) => updateOrderDraftItem(item.id, { unitPrice: value })}
+                            required
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          aria-label={`Remover produto ${index + 1} do pedido`}
+                          title="Remover produto"
+                          onClick={() =>
+                            setOrderDraft((current) => ({
+                              ...current,
+                              items: current.items.filter((draft) => draft.id !== item.id),
+                            }))
                           }
-                          className={fieldClass}
-                        />
-                      </label>
+                          disabled={orderDraft.items.length === 1}
+                          className="grid size-10 place-self-end place-items-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-30 sm:place-self-center"
+                        >
+                          <Trash2 size={16} aria-hidden="true" />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <button
                         type="button"
-                        onClick={toggleCustomPrice}
-                        className="h-11 justify-self-start rounded-xl px-3 text-sm font-medium text-slate-600 transition hover:bg-white hover:text-slate-900"
+                        onClick={() =>
+                          setOrderDraft((current) => ({
+                            ...current,
+                            items: [
+                              ...current.items,
+                              { id: createId(), productId: "", quantity: "1", unitPrice: "" },
+                            ],
+                          }))
+                        }
+                        disabled={!data.products.length}
+                        className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Usar valor único
+                        <Plus size={14} aria-hidden="true" />
+                        Adicionar produto
                       </button>
+                      {!data.products.length && (
+                        <button
+                          type="button"
+                          onClick={() => setProductsPanelOpen(true)}
+                          className="text-left text-xs font-medium text-amber-700 hover:underline"
+                        >
+                          Cadastre um produto na aba Produtos e valores para continuar.
+                        </button>
+                      )}
                     </div>
-                  )}
-
-                  <div className="flex min-h-11 items-center justify-between rounded-xl bg-emerald-50 px-3.5">
+                  </div>
+                  <div className="flex min-h-11 items-center justify-between rounded-xl bg-emerald-50 px-3.5 sm:col-span-2 lg:col-span-3">
                     <span className="text-xs font-medium text-emerald-800">Total do pedido</span>
                     <strong className="text-base font-semibold tracking-tight text-emerald-800">
-                      {money(orderEstimate)}
+                      {money(orderEstimateCents / 100)}
                     </strong>
                   </div>
                   <button
                     type="submit"
-                    className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 focus:outline-none focus:ring-4 focus:ring-emerald-600/20 sm:col-span-2 lg:col-span-1"
+                    disabled={!data.products.length}
+                    className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800 focus:outline-none focus:ring-4 focus:ring-emerald-600/20 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-2 lg:col-span-1"
                   >
                     <Save size={16} aria-hidden="true" />
                     Salvar
                   </button>
                 </form>
-                <p className="mt-3 text-xs leading-5 text-slate-500">
-                  Preço padrão para novos pedidos: {money(data.unitPrice)}. Se precisar, altere o valor apenas deste pedido.
-                </p>
               </div>
 
               <div className="mb-3 mt-8 flex items-center justify-between gap-3">
@@ -1169,7 +1314,8 @@ function Dashboard({ user, themeToggle }) {
               {selectedOrders.length ? (
                 <div className="space-y-3">
                   {selectedOrders.map((order) => {
-                    const total = Math.round(order.quantity * order.unitPrice * 100) / 100;
+                    const total = getOrderTotalCents(order) / 100;
+                    const quantity = order.items.reduce((sum, item) => sum + item.quantity, 0);
                     const pending = Math.max(0, Math.round((total - order.received) * 100) / 100);
                     const isEditing = editingOrderId === order.id;
                     return (
@@ -1187,12 +1333,19 @@ function Dashboard({ user, themeToggle }) {
                               type="button"
                               onClick={() => {
                                 setEditingOrderId(isEditing ? null : order.id);
-                                setEditPriceDraft(formatPriceValue(order.unitPrice));
+                                setEditPriceDrafts(
+                                  Object.fromEntries(
+                                    order.items.map((item) => [
+                                      item.id,
+                                      formatPriceValue(item.unitPrice),
+                                    ]),
+                                  ),
+                                );
                               }}
                               className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
                             >
                               <Pencil size={14} aria-hidden="true" />
-                              {isEditing ? "Fechar" : "Editar preço"}
+                              {isEditing ? "Fechar" : "Editar valores"}
                             </button>
                             <button
                               type="button"
@@ -1209,8 +1362,11 @@ function Dashboard({ user, themeToggle }) {
                         </div>
 
                         <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-5">
-                          <Stat label="Quantidade" value={order.quantity} />
-                          <Stat label="Valor unitário" value={money(order.unitPrice)} />
+                          <Stat label="Unidades" value={quantity} />
+                          <Stat
+                            label="Produtos"
+                            value={order.items.map((item) => `${item.name} × ${item.quantity}`).join(", ")}
+                          />
                           <Stat label="Pedido" value={money(total)} />
                           <Stat label="Recebido" value={money(order.received)} tone="green" />
                           <Stat label="Falta receber" value={money(pending)} tone={pending > 0 ? "amber" : "slate"} />
@@ -1218,18 +1374,32 @@ function Dashboard({ user, themeToggle }) {
 
                         {isEditing && (
                           <form
-                            className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:items-end"
+                            className="mt-4 grid gap-3 border-t border-slate-100 pt-4"
                             onSubmit={(event) => saveOrderPrice(event, order)}
                           >
-                            <label className="grid max-w-xs flex-1 gap-1.5 text-xs font-medium text-slate-600">
-                              Novo valor por produto
-                              <CurrencyInput
-                                label={`Novo valor por produto do pedido de ${formatDate(order.date)}`}
-                                value={editPriceDraft}
-                                onChange={setEditPriceDraft}
-                                required
-                              />
-                            </label>
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              {order.items.map((item) => (
+                                <label
+                                  key={item.id}
+                                  className="grid gap-1.5 text-xs font-medium text-slate-600"
+                                >
+                                  {item.name} - novo valor neste pedido
+                                  <CurrencyInput
+                                    label={`Novo valor de ${item.name} neste pedido`}
+                                    value={
+                                      editPriceDrafts[item.id] ?? formatPriceValue(item.unitPrice)
+                                    }
+                                    onChange={(value) =>
+                                      setEditPriceDrafts((current) => ({
+                                        ...current,
+                                        [item.id]: value,
+                                      }))
+                                    }
+                                    required
+                                  />
+                                </label>
+                              ))}
+                            </div>
                             <div className="flex gap-2">
                               <button
                                 type="submit"
@@ -1240,7 +1410,10 @@ function Dashboard({ user, themeToggle }) {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setEditingOrderId(null)}
+                                onClick={() => {
+                                  setEditingOrderId(null);
+                                  setEditPriceDrafts({});
+                                }}
                                 className="h-11 rounded-xl border border-slate-200 px-3.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
                               >
                                 Cancelar
@@ -1292,7 +1465,7 @@ function Dashboard({ user, themeToggle }) {
                   </span>
                   <p className="mt-3 text-sm font-medium text-slate-700">Nenhum pedido neste ponto</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Preencha a data e a quantidade acima para registrar um pedido.
+                    Selecione os produtos e informe as quantidades acima para registrar um pedido.
                   </p>
                 </div>
               )}
@@ -1304,6 +1477,268 @@ function Dashboard({ user, themeToggle }) {
           Seus dados são sincronizados na sua conta.
         </footer>
       </main>
+
+      {productsPanelOpen && (
+        <div
+          className={`products-panel-backdrop fixed inset-0 z-50 bg-slate-950/40 backdrop-blur-[2px] ${
+            productsPanelClosing ? "products-panel-backdrop-exit" : ""
+          }`}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeProductsPanel();
+          }}
+        >
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="products-panel-title"
+            className={`products-panel ml-auto flex h-full w-[80vw] max-w-md flex-col overflow-hidden border-l border-slate-200 bg-white p-5 shadow-2xl sm:w-full sm:p-6 ${
+              productsPanelClosing ? "products-panel-exit" : ""
+            }`}
+          >
+            <header className="flex items-start justify-start gap-2 border-b border-slate-100 pb-4">
+              <button
+                type="button"
+                onClick={closeProductsPanel}
+                aria-label="Fechar produtos e valores"
+                title="Fechar"
+                className="hidden size-9 shrink-0 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 sm:grid"
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">
+                  Cadastro
+                </p>
+                <h2
+                  id="products-panel-title"
+                  className="mt-1 text-xl font-semibold tracking-tight text-slate-950"
+                >
+                  Produtos e valores
+                </h2>
+                <p className="mt-1 text-sm leading-5 text-slate-500">
+                  Cadastre seus produtos e aumente seu catálogo.
+                </p>
+              </div>
+            </header>
+
+            <div className="order-first flex flex-col py-2 sm:hidden">
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={closeProductsPanel}
+                  aria-label="Fechar produtos e valores"
+                  title="Fechar"
+                  className="grid size-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
+                >
+                  <X size={17} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="flex flex-row-reverse items-center gap-2">
+                {profileNameEditing ? (
+                  <form
+                    className="flex min-w-0 flex-1 items-center gap-1"
+                    onSubmit={saveProfileName}
+                  >
+                    <label className="sr-only" htmlFor="panel-profile-name">
+                      Nome do perfil
+                    </label>
+                    <input
+                      id="panel-profile-name"
+                      className="h-8 w-16 min-w-0 shrink-0 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10"
+                      autoComplete="name"
+                      maxLength={80}
+                      value={profileNameDraft}
+                      onChange={(event) => setProfileNameDraft(event.target.value)}
+                      disabled={profileNameSaving}
+                      required
+                    />
+                    <button
+                      type="submit"
+                      aria-label="Salvar nome"
+                      title="Salvar nome"
+                      className="grid size-7 shrink-0 place-items-center rounded-lg bg-emerald-50 text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={profileNameSaving}
+                    >
+                      <Check size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Cancelar alteração do nome"
+                      title="Cancelar"
+                      onClick={cancelProfileNameEdit}
+                      className="grid size-7 shrink-0 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
+                      disabled={profileNameSaving}
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    type="button"
+                    aria-label={`Editar nome do perfil: ${profileName}`}
+                    title="Clique para editar o nome do perfil"
+                    onClick={editProfileName}
+                    className="group flex min-h-9 min-w-0 flex-1 items-center gap-1 rounded-lg px-1 text-left text-xs font-medium text-slate-600 transition hover:bg-slate-50 hover:text-emerald-700 focus-visible:ring-2 focus-visible:ring-emerald-500/20"
+                  >
+                    <span className="truncate">{profileName}</span>
+                    <Pencil
+                      size={14}
+                      aria-hidden="true"
+                      className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+                    />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={signOut}
+                  aria-label="Sair da conta"
+                  title="Sair da conta"
+                  className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-4 focus:ring-slate-500/10"
+                >
+                  <LogOut size={14} aria-hidden="true" />
+                  Sair
+                </button>
+              </div>
+            </div>
+
+            <form className="grid gap-3 border-b border-slate-100 py-5" onSubmit={saveProducts}>
+              <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-2">
+                <label className="grid min-w-0 gap-1.5 text-xs font-medium text-slate-600">
+                  Nome
+                  <input
+                    className={fieldClass}
+                    value={productDraft.name}
+                    onChange={(event) => updateProductDraft("name", event.target.value)}
+                    maxLength={80}
+                    placeholder="Ex.: Picolé"
+                    required
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                  Valor
+                  <CurrencyInput
+                    label="Valor do produto"
+                    value={productDraft.unitPrice}
+                    onChange={(value) => updateProductDraft("unitPrice", value)}
+                    required
+                  />
+                </label>
+              </div>
+              <button
+                type="submit"
+                disabled={!canSaveProduct}
+                className={`inline-flex h-11 items-center justify-center gap-1.5 rounded-xl border px-4 text-sm font-semibold transition ${
+                  canSaveProduct
+                    ? "border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800"
+                    : "cursor-not-allowed border-emerald-700/40 bg-transparent text-emerald-700/60"
+                }`}
+              >
+                <Save size={16} aria-hidden="true" />
+                Salvar
+              </button>
+            </form>
+
+            <section className="flex min-h-0 flex-1 flex-col pt-5">
+              <h3 className="mb-3 shrink-0 text-sm font-semibold text-slate-900">
+                Produtos cadastrados
+              </h3>
+              {data.products.length ? (
+                <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-200">
+                  {data.products.map((product) => (
+                    <li
+                      key={product.id}
+                      className="px-3 py-3 text-sm"
+                    >
+                      {editingProductId === product.id ? (
+                        <form
+                          className="grid gap-2"
+                          onSubmit={(event) => saveCatalogProduct(event, product)}
+                        >
+                          <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                            Nome do produto
+                            <input
+                              className={fieldClass}
+                              value={productEditDraft.name}
+                              onChange={(event) =>
+                                setProductEditDraft((current) => ({
+                                  ...current,
+                                  name: event.target.value,
+                                }))
+                              }
+                              maxLength={80}
+                              required
+                            />
+                          </label>
+                          <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+                            Valor para novos pedidos
+                            <CurrencyInput
+                              label={`Valor de ${product.name} para novos pedidos`}
+                              value={productEditDraft.unitPrice}
+                              onChange={(value) =>
+                                setProductEditDraft((current) => ({
+                                  ...current,
+                                  unitPrice: value,
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <div className="flex gap-2">
+                            <button
+                              type="submit"
+                              className="inline-flex h-9 items-center gap-1 rounded-lg bg-emerald-700 px-3 text-xs font-semibold text-white transition hover:bg-emerald-800"
+                            >
+                              <Check size={14} aria-hidden="true" />
+                              Salvar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingProductId(null)}
+                              className="h-9 rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="min-w-0 truncate font-medium text-slate-700">
+                            {product.name}
+                          </span>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <strong className="text-slate-900">
+                              {money(product.unitPrice)}
+                            </strong>
+                            <button
+                              type="button"
+                              aria-label={`Editar ${product.name}`}
+                              title={`Editar ${product.name}`}
+                              onClick={() => {
+                                setEditingProductId(product.id);
+                                setProductEditDraft({
+                                  name: product.name,
+                                  unitPrice: formatPriceValue(product.unitPrice),
+                                });
+                              }}
+                              className="grid size-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-emerald-700"
+                            >
+                              <Pencil size={14} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                  Nenhum produto cadastrado.
+                </p>
+              )}
+            </section>
+          </aside>
+        </div>
+      )}
 
       {pendingDelete && (
         <div
